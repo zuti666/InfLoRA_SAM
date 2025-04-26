@@ -18,6 +18,8 @@ from utils.schedulers import CosineSchedule
 import ipdb
 import math
 
+from optimer_sam import SAM, enable_running_stats, disable_running_stats
+
 class InfLoRA(BaseLearner):
 
     def __init__(self, args):
@@ -34,6 +36,8 @@ class InfLoRA(BaseLearner):
 
         self.args = args
         self.optim = args["optim"]
+        #  为 SAM 优化器设置 rho
+        self.rho = args["rho"]
         self.EPSILON = args["EPSILON"]
         self.init_epoch = args["init_epoch"]
         self.init_lr = args["init_lr"]
@@ -91,10 +95,16 @@ class InfLoRA(BaseLearner):
         #     self._old_network.to(self._device)
 
         for name, param in self._network.named_parameters():
+            # 先冻结所有参数
             param.requires_grad_(False)
             try:
+                # 只训练最后一层 任务分类器
                 if "classifier_pool" + "." + str(self._network.module.numtask - 1) in name:
                     param.requires_grad_(True)
+                # LoRA分支的 B矩阵的 value 和 key 部分
+                # numtask - 1 就是当前任务编号（因为从0开始
+                # 所以当检查 name 时，会找到 "lora_B_k.0"、"lora_B_k.1" 等，
+                # 只对当前任务编号对应的参数设置为 requires_grad=True，其他全部冻结
                 if "lora_B_k" + "." + str(self._network.module.numtask - 1) in name:
                     param.requires_grad_(True)
                 if "lora_B_v" + "." + str(self._network.module.numtask - 1) in name:
@@ -113,6 +123,7 @@ class InfLoRA(BaseLearner):
             if param.requires_grad:
                 enabled.add(name)
 
+        # 在无梯度模式下，提取当前任务的输入特征用于构造 cur_matrix
         with torch.no_grad():
             for i, (_, inputs, targets) in enumerate(train_loader):
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
@@ -123,12 +134,16 @@ class InfLoRA(BaseLearner):
                 for module in self._network.modules():
                     if isinstance(module, Attention_LoRA):
                         cur_matrix = module.cur_matrix
+
+                        # 直接对 cur_matrix 做 SVD，提取主成分方向（子空间）作为新的 LoRA 分支初始值
+                        # 1/√3 是一个缩放因子，常用于初始化稳定训
                         U, S, V = torch.linalg.svd(cur_matrix)
                         module.lora_A_k[self._cur_task].weight.data.copy_(U[:,:module.rank].T/math.sqrt(3))
                         module.lora_A_v[self._cur_task].weight.data.copy_(U[:,:module.rank].T/math.sqrt(3))
                         module.cur_matrix.zero_()
                         module.n_cur_matrix = 0
-            else:
+            else:  # 后续任务
+
                 # kk = 0
                 # for module in self._network.modules():
                 #     if isinstance(module, Attention_LoRA):
@@ -145,14 +160,25 @@ class InfLoRA(BaseLearner):
                 for module in self._network.modules():
                     if isinstance(module, Attention_LoRA):
                         cur_matrix = module.cur_matrix
+
+                        # 对 cur_matrix 进行子空间投影
+                        
+                        # remove：去除旧任务子空间影响（从 cur_matrix 中减去
                         if self.project_type[kk] == 'remove':
                             cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
+                        # retain：保留旧任务主方向（映射到旧子空间
                         else:
                             assert self.project_type[kk] == 'retain'
                             cur_matrix = torch.mm(self.feature_mat[kk],cur_matrix)
+                        
+                        # 直接对 cur_matrix 做 SVD，提取主成分方向（子空间）作为新的 LoRA 分支初始值
                         cU, cS, cV = torch.linalg.svd(cur_matrix, full_matrices=False)
+
+                        # 1/√3 是一个缩放因子，常用于初始化稳定训
                         module.lora_A_k[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
                         module.lora_A_v[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
+
+
                         module.cur_matrix.zero_()
                         module.n_cur_matrix = 0
                         kk += 1
@@ -160,28 +186,87 @@ class InfLoRA(BaseLearner):
         print(f"Parameters to be updated: {enabled}")
         if len(self._multiple_gpus) > 1:
             self._network = nn.DataParallel(self._network, self._multiple_gpus)
+        
+        #  Optimizer 构造与主训练
+        # 区分首个任务和后续任务的训练轮数与学习率配置（首任务通常训练更充分）
         if self._cur_task==0:
+            print(f'Debug init task self.optim: {self.optim}')
             if self.optim == 'sgd':
                 optimizer = optim.SGD(self._network.parameters(), momentum=0.9,lr=self.init_lr,weight_decay=self.init_weight_decay)
                 scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer,T_max=self.init_epoch)
             elif self.optim == 'adam':
                 optimizer = optim.Adam(self._network.parameters(),lr=self.init_lr,weight_decay=self.init_weight_decay, betas=(0.9,0.999))
                 scheduler = CosineSchedule(optimizer=optimizer,K=self.init_epoch)
+            elif self.optim == 'sam-sgd':
+                # optimizer = optim.SGD(self._network.parameters(), momentum=0.9,lr=self.init_lr,weight_decay=self.init_weight_decay)
+                optimizer = SAM(
+                    self._network.parameters(),
+                    base_optimizer=optim.SGD,
+                    rho=self.rho,
+                    lr=self.init_lr,
+                    momentum=0.9,
+                    weight_decay=self.init_weight_decay
+                )
+                scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer.base_optimizer,T_max=self.init_epoch)
+
+            elif self.optim == 'sam-adam':
+                # optimizer = optim.Adam(self._network.parameters(),lr=self.init_lr,weight_decay=self.init_weight_decay, betas=(0.9,0.999))
+                
+                optimizer = SAM(
+                    self._network.parameters(),
+                    base_optimizer=optim.Adam,
+                    rho=self.rho,
+                    lr=self.init_lr,
+                    betas=(0.9,0.999),
+                    weight_decay=self.init_weight_decay
+                )
+                scheduler = CosineSchedule(optimizer=optimizer.base_optimizer,K=self.init_epoch)
+                
+                
+
+
             else:
                 raise Exception
             self.run_epoch = self.init_epoch
             self.train_function(train_loader,test_loader,optimizer,scheduler)
         else:
+            print(f'Debug later task self.optim: {self.optim}')
             if self.optim == 'sgd':
                 optimizer = optim.SGD(self._network.parameters(), momentum=0.9,lr=self.lrate,weight_decay=self.weight_decay)
                 scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer,T_max=self.epochs)
             elif self.optim == 'adam':
                 optimizer = optim.Adam(self._network.parameters(),lr=self.lrate,weight_decay=self.weight_decay, betas=(0.9,0.999))
                 scheduler = CosineSchedule(optimizer=optimizer,K=self.epochs)
+            elif self.optim == 'sam-sgd':
+                # optimizer = optim.SGD(self._network.parameters(), momentum=0.9,lr=self.init_lr,weight_decay=self.init_weight_decay)
+                optimizer = SAM(
+                    self._network.parameters(),
+                    base_optimizer=optim.SGD,
+                    rho=self.rho,
+                    lr=self.lrate,
+                    momentum=0.9,
+                    weight_decay=self.weight_decay
+                )
+                scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer.base_optimizer,T_max=self.epoch)
+
+            elif self.optim == 'sam-adam':
+                # optimizer = optim.Adam(self._network.parameters(),lr=self.init_lr,weight_decay=self.init_weight_decay, betas=(0.9,0.999))
+                
+                optimizer = SAM(
+                    self._network.parameters(),
+                    base_optimizer=optim.Adam,
+                    rho=self.rho,
+                    lr=self.lrate,
+                    betas=(0.9,0.999),
+                    weight_decay=self.weight_decay
+                )
+                scheduler = CosineSchedule(optimizer=optimizer.base_optimizer,K=self.epochs)
             else:
                 raise Exception
             self.run_epoch = self.epochs
             self.train_function(train_loader, test_loader, optimizer, scheduler)
+        
+        
         if len(self._multiple_gpus) > 1:
             self._network = self._network.module
 
@@ -190,15 +275,19 @@ class InfLoRA(BaseLearner):
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
                 self._network(inputs, get_cur_feat=True)
 
+            # 再次提取 cur_matrix，用于更新当前任务的 投影子空间矩阵（GPM 或 DualGPM）
             mat_list = []
             for module in self._network.modules():
                 if isinstance(module, Attention_LoRA):
                     mat_list.append(deepcopy(module.cur_matrix))
                     module.cur_matrix.zero_()
                     module.n_cur_matrix = 0
+
+            # update_DualGPM() 用于多任务、双空间（key 与 value）信息的保留。
             # self.update_GPM(mat_list)
             self.update_DualGPM(mat_list)
-
+            
+            #这一步是为了后续任务使用 subspace 投影策略（retain/remove）
             # Projection Matrix Precomputation
             self.feature_mat = []
             for p in range(len(self.feature_list)):
@@ -211,7 +300,8 @@ class InfLoRA(BaseLearner):
     def train_function(self, train_loader, test_loader, optimizer, scheduler):
         prog_bar = tqdm(range(self.run_epoch))
         for _, epoch in enumerate(prog_bar):
-            self._network.eval()
+            # self._network.eval()
+            self._network.train()
             losses = 0.
             correct, total = 0, 0
             for i, (_, inputs, targets) in enumerate(train_loader):
@@ -221,13 +311,45 @@ class InfLoRA(BaseLearner):
                 inputs = torch.index_select(inputs, 0, mask)
                 targets = torch.index_select(targets, 0, mask)-self._known_classes
 
+                # == 第一次 forward ==
                 logits = self._network(inputs)['logits']
                 loss = F.cross_entropy(logits, targets)
 
-                optimizer.zero_grad()
-                loss.backward()
+                if  'sam' in self.optim.lower():
+                    # print('SAM')
 
-                optimizer.step()
+                    # ✅ 启用 BN running stats：用于真实训练
+                    enable_running_stats(self._network)
+
+                    # == 第一次 backward ==
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.first_step(zero_grad=True)
+
+                    
+                    # ❗禁用 BN running stats：避免污染 BN 统计
+                    disable_running_stats(self._network)
+
+                    # second forward-backward
+                    logits = self._network(inputs)['logits']
+                    second_loss = F.cross_entropy(logits, targets)
+
+                    # == 第二次 backward ==
+        
+                    second_loss.backward()
+                    optimizer.second_step(zero_grad=True)
+
+                else:
+                    # print('No-SAM')
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    
+
+
+
+
                 losses += loss.item()
 
                 _, preds = torch.max(logits, dim=1)

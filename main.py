@@ -22,10 +22,11 @@ def setup_parser():
     parser = argparse.ArgumentParser(description='Reproduce of multiple continual learning algorthms.')
     parser.add_argument('--config', type=str, default='./exps/finetune.json',
                         help='Json file of settings.')
-    parser.add_argument('--device', type=str, default='0')
+    parser.add_argument('--device', type=str, default='1')
 
     # # optim
-    # parser.add_argument('--optim', type=str, default='adam', choices=['adam', 'sgd'])
+    # parser.add_argument('--optim', type=str, default='adam', choices=['adam', 'sgd','sam-adam', 'sam-sgd'])
+    parser.add_argument('--rho', type=float, default=0.05)
     return parser
 
 

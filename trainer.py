@@ -11,6 +11,9 @@ from utils.toolkit import count_parameters
 
 
 def train(args):
+    print('Training with the following parameters:')
+    print(args)
+    
     seed_list = copy.deepcopy(args['seed'])
     device = copy.deepcopy(args['device'])
     device = device.split(',')
@@ -37,7 +40,7 @@ def _train(args):
         os.makedirs(logdir)
     logfilename = os.path.join(logdir, '{}'.format(args['seed']))
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,
         format='%(asctime)s [%(filename)s] => %(message)s',
         handlers=[
             logging.FileHandler(filename=logfilename + '.log'),
@@ -61,6 +64,7 @@ def _train(args):
         time_start = time.time()
         model.incremental_train(data_manager)
         time_end = time.time()
+
         logging.info('Time:{}'.format(time_end - time_start))
         time_start = time.time()
         cnn_accy, cnn_accy_with_task, nme_accy, cnn_accy_task = model.eval_task()

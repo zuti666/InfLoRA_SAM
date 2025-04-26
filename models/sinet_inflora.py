@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import copy
+from functools import partial
 
 from models.vit_inflora import VisionTransformer, PatchEmbed, Block,resolve_pretrained_cfg, build_model_with_cfg, checkpoint_filter_fn
 from models.zoo import CodaPrompt
@@ -10,12 +11,12 @@ class ViT_lora_co(VisionTransformer):
             self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, global_pool='token',
             embed_dim=768, depth=12, num_heads=12, mlp_ratio=4., qkv_bias=True, representation_size=None,
             drop_rate=0., attn_drop_rate=0., drop_path_rate=0., weight_init='', init_values=None,
-            embed_layer=PatchEmbed, norm_layer=None, act_layer=None, block_fn=Block, n_tasks=10, rank=64):
+            embed_layer=PatchEmbed, norm_layer=None, act_layer=None, block_fn=Block, n_tasks=10, rank=64,**kwargs ):
 
         super().__init__(img_size=img_size, patch_size=patch_size, in_chans=in_chans, num_classes=num_classes, global_pool=global_pool,
             embed_dim=embed_dim, depth=depth, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, representation_size=representation_size,
             drop_rate=drop_rate, attn_drop_rate=attn_drop_rate, drop_path_rate=drop_path_rate, weight_init=weight_init, init_values=init_values,
-            embed_layer=embed_layer, norm_layer=norm_layer, act_layer=act_layer, block_fn=block_fn, n_tasks=n_tasks, rank=rank)
+            embed_layer=embed_layer, norm_layer=norm_layer, act_layer=act_layer, block_fn=block_fn, n_tasks=n_tasks, rank=rank,**kwargs)
 
 
     def forward(self, x, task_id, register_blk=-1, get_feat=False, get_cur_feat=False):
@@ -42,20 +43,96 @@ def _create_vision_transformer(variant, pretrained=False, **kwargs):
     # NOTE this extra code to support handling of repr size for in21k pretrained models
     # pretrained_cfg = resolve_pretrained_cfg(variant, kwargs=kwargs)
     pretrained_cfg = resolve_pretrained_cfg(variant)
-    default_num_classes = pretrained_cfg['num_classes']
+
+    print('---debug----')
+    print(pretrained_cfg)
+
+    # default_num_classes = pretrained_cfg['num_classes']
+    default_num_classes = pretrained_cfg.num_classes
     num_classes = kwargs.get('num_classes', default_num_classes)
     repr_size = kwargs.pop('representation_size', None)
     if repr_size is not None and num_classes != default_num_classes:
         repr_size = None
 
+    
+    # ✅ 提前处理这个字段
+    custom_load = ('npz' in pretrained_cfg.url) if pretrained_cfg.url else False
+    # pretrained_cfg['custom_load'] = custom_load
+
+    # 替换成属性赋值
+    if hasattr(pretrained_cfg, "custom_load"):
+        pretrained_cfg.custom_load = custom_load
+    # ✅ 如果是 npz，不要触发 timm 的 torch.load
+    # timm_pretrained = pretrained and not custom_load
+
+    print('---debug:---- ')
+    print(f' build_model_with_cfg(pretrained={pretrained},pretrained_cfg={pretrained_cfg},pretrained_custom_load={custom_load}) ')
+    
     model = build_model_with_cfg(
-        ViT_lora_co, variant, pretrained,
+        ViT_lora_co, variant, 
+        pretrained= pretrained,  
         pretrained_cfg=pretrained_cfg,
         representation_size=repr_size,
         pretrained_filter_fn=checkpoint_filter_fn,
-        pretrained_custom_load='npz' in pretrained_cfg['url'],
-        **kwargs)
+        pretrained_custom_load=custom_load,
+            **kwargs)
+
     return model
+
+
+
+    # model = build_model_with_cfg(
+    #     ViT_lora_co, variant, pretrained,
+    #     pretrained_cfg=pretrained_cfg,
+    #     representation_size=repr_size,
+    #     pretrained_filter_fn=checkpoint_filter_fn,
+    #     pretrained_custom_load='npz' in pretrained_cfg['url'],#     **kwargs)
+
+
+    # model = build_model_with_cfg(
+    # ViT_lora_co, variant, pretrained,
+    # pretrained_cfg=pretrained_cfg,
+    # representation_size=repr_size,
+    # pretrained_filter_fn=checkpoint_filter_fn,
+    # pretrained_custom_load='npz' in pretrained_cfg.url,# **kwargs
+    # )
+
+    # # ❗️提前获取 custom_load 标志
+    # custom_load = 'npz' in pretrained_cfg.url if pretrained_cfg.url else False
+
+    # # ❗️剔除不支持的 kwargs
+    # kwargs.pop('pretrained_custom_load', None)
+
+    # # 构建模型
+    # model = build_model_with_cfg(
+    #     ViT_lora_co, variant, pretrained,
+    #     pretrained_cfg=pretrained_cfg,
+    #     representation_size=repr_size,
+    #     pretrained_filter_fn=checkpoint_filter_fn,
+    #     # 只作为参数传给 builder 函数，不传进模型构造器
+    #     pretrained_custom_load=custom_load,
+    #     **kwargs
+    # )
+    # # 构建构造函数的 partial，不传非法参数
+    # custom_load = 'npz' in pretrained_cfg.url if pretrained_cfg.url else False
+
+    # model_cls = partial(ViT_lora_co, **kwargs)
+
+    # model = build_model_with_cfg(
+    #     model_cls, variant, pretrained,
+    #     pretrained_cfg=pretrained_cfg,
+    #     representation_size=repr_size,
+    #     pretrained_filter_fn=checkpoint_filter_fn,
+    #     pretrained_custom_load=custom_load
+    # )
+
+    
+
+    
+
+    
+
+    
 
 
 
@@ -65,25 +142,45 @@ class SiNet(nn.Module):
         super(SiNet, self).__init__()
 
         model_kwargs = dict(patch_size=16, embed_dim=768, depth=12, num_heads=12, n_tasks=args["total_sessions"], rank=args["rank"])
-        self.image_encoder =_create_vision_transformer('vit_base_patch16_224_in21k', pretrained=True, **model_kwargs)
-        # print(self.image_encoder)
-        # exit()
 
-        self.class_num = 1
+
+        # 判断是否跳过 timm 自带预训练逻辑，改为加载训练后模型权重
+        if args.get("reload_model", False):
+            # 不使用 ImageNet21k 预训练，构建裸模型
+            self.image_encoder = _create_vision_transformer(
+                'vit_base_patch16_224_in21k', pretrained=False, **model_kwargs)
+        else:
+            # 默认行为：加载 timm 的 ImageNet21k 权重
+            self.image_encoder = _create_vision_transformer(
+                'vit_base_patch16_224_in21k', pretrained=True, **model_kwargs)
+
+
+        # 分类器池：每个任务一个头
         self.class_num = args["init_cls"]
         self.classifier_pool = nn.ModuleList([
             nn.Linear(args["embd_dim"], self.class_num, bias=True)
-            for i in range(args["total_sessions"])
+            for _ in range(args["total_sessions"])
         ])
-
         self.classifier_pool_backup = nn.ModuleList([
             nn.Linear(args["embd_dim"], self.class_num, bias=True)
-            for i in range(args["total_sessions"])
+            for _ in range(args["total_sessions"])
         ])
 
-        # self.prompt_pool = CodaPrompt(args["embd_dim"], args["total_sessions"], args["prompt_param"])
-
+        # 当前任务编号
         self.numtask = 0
+
+        # ✅ 若 reload_model，则手动加载训练好的模型参数
+        if args.get("reload_model", False):
+            assert "pretrained_ckpt" in args, "reload_model=True 但未提供 pretrained_ckpt 参数！"
+            state_dict = torch.load(args["pretrained_ckpt"], map_location="cpu")
+
+            # 可选择只加载 image_encoder，也可加载整体 _network
+            missing_keys, unexpected_keys = self.load_state_dict(state_dict, strict=False)
+            print(f"[SiNet] Loaded from checkpoint: {args['pretrained_ckpt']}")
+            print(f"[SiNet] Missing keys: {missing_keys}")
+            print(f"[SiNet] Unexpected keys: {unexpected_keys}")
+
+
 
     @property
     def feature_dim(self):

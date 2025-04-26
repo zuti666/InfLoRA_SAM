@@ -1,0 +1,45 @@
+# 忽略所有临时文件、缓存和日志
+*.log
+*.tmp
+*.cache
+*.bak
+*.pyc
+
+# 忽略常见的数据文件
+*.csv
+*.tsv
+*.xlsx
+*.h5
+*.npz
+*.npy
+*.pkl
+
+# 忽略结果文件（如模型、图表、输出）
+*.pth
+*.ckpt
+*.pt
+*.onnx
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# 忽略特定目录
+# 忽略所有目录下的 __pycache__ 文件夹及其内容
+**/__pycache__/
+cache/
+tmp/
+output/
+results/
+runs/
+logs/
+checkpoints/
+data/
+logs/
+logs*
+
+# IDE或编辑器相关（可选，但建议加上）
+.vscode/
+.idea/
+.DS_Store

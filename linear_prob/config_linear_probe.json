@@ -1,0 +1,11 @@
+{
+    "model_name": "InfLoRA",
+    "pretrained_ckpt": "logs/cifar100/10_10_sip/InfLoRA/adam/10/0.95_1.0-0.0005/0/task_9.pth",
+    "probe_dataset": "cifar10",
+    "probe_classes": 10,
+    "embd_dim": 768,
+    "batch_size": 128,
+    "num_workers": 8,
+    "probe_epochs": 20
+  }
+  

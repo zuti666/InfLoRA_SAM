@@ -1,0 +1,46 @@
+{
+  "model_name": "InfLoRA",
+  "pretrained_ckpt": "logs/cifar100/10_10_sip/InfLoRA/adam/10/0.95_1.0-0.0005/0/task_0.pth",
+
+  "probe_dataset": "cifar10",
+  "probe_classes": 10,
+  "probe_epochs": 2,
+  "probe_task_ids": [1, 2, 3, 4, 5,6,7,8,9],
+
+  "embd_dim": 768,
+  "batch_size": 128,
+  "num_workers": 8,
+
+
+  "prefix": "linear_probe",
+  "dataset": "cifar100",
+  "data_path": "data/",
+  "memory_size": 0,
+  "memory_per_class": 0,
+  "fixed_memory": true,
+  "shuffle": false,
+  "init_cls": 10,
+  "increment": 10,
+  "net_type": "sip",
+  "num_heads": 12,
+  "total_sessions": 10,
+  "seed": 0, 
+  "EPSILON": 1e-8,
+
+  "init_epoch": 20,
+  "epochs": 20,
+
+  "optim": "adam",
+  "init_lr": 0.0005,
+  "lrate": 0.0005,
+  "init_lr_decay": 0.1,
+  "lrate_decay": 0.1,
+  "init_weight_decay": 0.0,
+  "weight_decay": 0.0,
+
+  "rank": 10,
+  "lamb": 0.95,
+  "lame": 1.0
+}
+
+  
