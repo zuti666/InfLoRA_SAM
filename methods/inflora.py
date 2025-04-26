@@ -312,14 +312,15 @@ class InfLoRA(BaseLearner):
                 targets = torch.index_select(targets, 0, mask)-self._known_classes
 
                 # == 第一次 forward ==
+                # ✅ 启用 BN running stats：用于真实训练
+                enable_running_stats(self._network)
                 logits = self._network(inputs)['logits']
                 loss = F.cross_entropy(logits, targets)
 
                 if  'sam' in self.optim.lower():
                     # print('SAM')
 
-                    # ✅ 启用 BN running stats：用于真实训练
-                    enable_running_stats(self._network)
+                    
 
                     # == 第一次 backward ==
                     optimizer.zero_grad()
